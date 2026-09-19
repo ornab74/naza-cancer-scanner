@@ -1,0 +1,5 @@
+cryptography_android_wheel=cryptography-46.0.5-cp313-abi3-android_30_arm64_v8a.whl
+cryptography_android_wheel_sha256=966cf5a2f29eaf63cffbde1fe17aaf99916c31e724d660068daca17a817113dd
+cffi_android_wheel=cffi-2.1.1-cp313-cp313-android_30_arm64_v8a.whl
+cffi_android_wheel_sha256=a98b8e0459bd775440f7b6eeea4cdaa5fab420381bd63ea3d501d45f8a2092e3
+pycparser_version=3.0

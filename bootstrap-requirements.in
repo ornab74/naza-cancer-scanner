@@ -1,0 +1,2 @@
+# CI-only dependency resolver. Compile with Python 3.12.
+pip-tools==7.6.1

@@ -1,0 +1,223 @@
+name: Lock requirements + PQ-sign lock manifest (no wheelhouse)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - requirements.in
+      - bootstrap-requirements.in
+      - bootstrap-requirements.txt
+      - .github/workflows/lock-requirements.yml
+
+# Required for GitHub/Sigstore provenance. The attestation binds the generated
+# lock artifacts to this repository and workflow identity independently of the
+# self-contained experimental PQ signature.
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  lock_and_pq_sign:
+    runs-on: ubuntu-latest
+
+    container:
+      image: python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install system tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl coreutils \
+            cmake ninja-build build-essential pkg-config git
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install hash-locked bootstrap tools
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r bootstrap-requirements.txt
+
+      - name: Generate hash-locked requirements.txt
+        run: |
+          set -euo pipefail
+          pip-compile \
+            --generate-hashes \
+            --resolver=backtracking \
+            --output-file requirements.txt \
+            requirements.in
+
+      - name: Build + install pinned liboqs
+        run: |
+          set -euo pipefail
+          LIBOQS_VERSION="0.14.0"
+          LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
+          LIBOQS_EXPECTED_SHA256="5b0df6138763b3fc4e385d58dbb2ee7c7c508a64a413d76a917529e3a9a207ea"
+
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+            -o /tmp/liboqs.tar.gz "${LIBOQS_URL}"
+          echo "${LIBOQS_EXPECTED_SHA256}  /tmp/liboqs.tar.gz" | sha256sum -c -
+          LIBOQS_SHA256="${LIBOQS_EXPECTED_SHA256}"
+
+          echo "LIBOQS_VERSION=${LIBOQS_VERSION}" >> "$GITHUB_ENV"
+          echo "LIBOQS_URL=${LIBOQS_URL}" >> "$GITHUB_ENV"
+          echo "LIBOQS_SHA256=${LIBOQS_SHA256}" >> "$GITHUB_ENV"
+
+          mkdir -p /tmp/liboqs-src
+          tar -xzf /tmp/liboqs.tar.gz -C /tmp/liboqs-src --strip-components=1
+
+          cmake -S /tmp/liboqs-src -B /tmp/liboqs-src/build \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_SHARED_LIBS=ON \
+            -DOQS_USE_OPENSSL=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DOQS_ENABLE_KEM_ML_KEM=ON \
+            -DOQS_ENABLE_KEM_HQC=ON \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            "-DOQS_MINIMAL_BUILD=KEM_ml_kem_1024;KEM_hqc_256;SIG_dilithium_2" \
+            -G Ninja
+
+          cmake --build /tmp/liboqs-src/build --parallel
+          cmake --install /tmp/liboqs-src/build
+          ldconfig
+
+          rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
+
+      - name: Install pinned liboqs-python wrapper
+        run: |
+          set -euo pipefail
+
+          LIBOQS_PY_REF="7906e7879a099fa34217035957d977314f99757d"
+          LIBOQS_PY_URL="https://github.com/open-quantum-safe/liboqs-python/archive/${LIBOQS_PY_REF}.tar.gz"
+          LIBOQS_PY_EXPECTED_SHA256="ed785fee58e43f20c042db97389ce63091b331278c24f63828c4b8dac0905f8c"
+
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+            -o /tmp/liboqs-python.tar.gz "${LIBOQS_PY_URL}"
+          echo "${LIBOQS_PY_EXPECTED_SHA256}  /tmp/liboqs-python.tar.gz" | sha256sum -c -
+
+          export OQS_INSTALL_PATH=/usr/local
+          export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          python -m pip install --no-deps --force-reinstall /tmp/liboqs-python.tar.gz
+
+          python - <<'PY'
+          import oqs
+
+          enabled = set(oqs.get_enabled_sig_mechanisms())
+          if "Dilithium2" not in enabled:
+              raise SystemExit("ERROR: Dilithium2 is not enabled in the pinned liboqs backend")
+          print("oqs ready; Dilithium2 enabled")
+          PY
+
+          echo "LIBOQS_PY_REF=${LIBOQS_PY_REF}" >> "$GITHUB_ENV"
+          echo "LIBOQS_PY_URL=${LIBOQS_PY_URL}" >> "$GITHUB_ENV"
+          echo "LIBOQS_PY_SHA256=${LIBOQS_PY_EXPECTED_SHA256}" >> "$GITHUB_ENV"
+
+          rm -f /tmp/liboqs-python.tar.gz
+
+      - name: Prepend provenance header into requirements.txt (BEFORE hashing/signing)
+        run: |
+          set -euo pipefail
+          {
+            echo "# liboqs_version=${LIBOQS_VERSION}"
+            echo "# liboqs_tarball_sha256=${LIBOQS_SHA256}"
+            echo "# liboqs_tarball_url=${LIBOQS_URL}"
+            echo "# liboqs_python_ref=${LIBOQS_PY_REF}"
+            echo "# liboqs_python_tarball_sha256=${LIBOQS_PY_SHA256}"
+            echo "# liboqs_python_tarball_url=${LIBOQS_PY_URL}"
+            echo "# pq_signature_alg=Dilithium2"
+            echo "# pq_manifest=lock.manifest.json"
+            echo "# pq_signature=lock.manifest.pqsig"
+            echo "# pq_pubkey=pq_pubkey.b64"
+            echo "# generated_by=github_actions_lock_and_pq_sign_lockfile"
+            echo
+            cat requirements.txt
+          } > requirements.tmp
+          mv requirements.tmp requirements.txt
+
+      - name: Create canonical lock manifest + PQ-sign it (Dilithium2)
+        run: |
+          set -euo pipefail
+          cat > /tmp/pq_sign_lock.py <<'PY'
+          import base64, hashlib, json, os, re, sys
+          import oqs
+
+          ALG = "Dilithium2"
+          REQ_PATH = "requirements.txt"
+
+          if not os.path.exists(REQ_PATH):
+              print("missing requirements.txt", file=sys.stderr)
+              sys.exit(2)
+
+          raw = open(REQ_PATH, "rb").read()
+          req_sha256 = hashlib.sha256(raw).hexdigest()
+
+          text = raw.decode("utf-8", errors="replace").splitlines()
+          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
+          pinned = []
+          for line in text:
+              m = pkg_re.match(line.strip())
+              if m:
+                  pinned.append({"name": m.group(1).lower(), "version": m.group(2)})
+          pinned.sort(key=lambda x: x["name"])
+
+          manifest_obj = {
+              "format": "pq-lock-manifest-v1",
+              "pq_alg": ALG,
+              "requirements_txt_sha256": req_sha256,
+              "pinned": pinned,
+          }
+
+          canonical = json.dumps(manifest_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+          with oqs.Signature(ALG) as s:
+              pub = s.generate_keypair()
+              sig = s.sign(canonical)
+
+          open("lock.manifest.json", "wb").write(canonical + b"\n")
+          open("lock.manifest.pqsig", "wb").write(sig)
+          open("pq_pubkey.b64", "w", encoding="utf-8").write(base64.b64encode(pub).decode("ascii") + "\n")
+
+          pub2 = base64.b64decode(open("pq_pubkey.b64", "r", encoding="utf-8").read().strip())
+          with oqs.Signature(ALG) as v:
+              ok = v.verify(canonical, sig, pub2)
+          if not ok:
+              print("PQ verify failed (self-check)", file=sys.stderr)
+              sys.exit(3)
+
+          print("OK: manifest PQ-signed and verified.")
+          PY
+
+          python /tmp/pq_sign_lock.py
+
+          echo "Produced files:"
+          ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
+
+      - name: Attest lock artifact provenance
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: |
+            requirements.txt
+            lock.manifest.json
+            lock.manifest.pqsig
+            pq_pubkey.b64
+
+      - name: Upload lock + PQ materials
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pq-locked-requirements
+          path: |
+            requirements.txt
+            lock.manifest.json
+            lock.manifest.pqsig
+            pq_pubkey.b64
+          retention-days: 30

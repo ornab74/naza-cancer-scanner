@@ -1,0 +1,48 @@
+# Python / tests
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+venv-termux/
+
+# Native build products / local dependency checkouts
+*.so
+*.so.*
+*.a
+*.o
+build/
+.local/
+cmake-build-*/
+
+# Release output
+dist/
+
+# Models and application secrets/state
+models/
+.enc_key
+chat_history.db*
+naza.lock.json
+.naza/
+.naza-private-tmp/
+.spooky_combiner_1.lab
+naza.last.receipt
+unlock.token
+.challenge.*
+.signature.*
+.unlock.token.*
+
+# Runtime / installer state
+*.tmp
+*.log
+.naza-native-repair.log
+.naza-native-repair.lock
+.naza-rotation
+.naza-rotation.lock
+.naza-gate3-*
+
+# Recovery/editor debris
+*.before-*
+*.pre-*
+*~
+.DS_Store
